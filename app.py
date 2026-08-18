@@ -6,7 +6,7 @@ import io
 
 app = Flask(__name__)
 
-async def rodar_scrapper_logic(termo_busca, max_resultados=8):
+async def rodar_scrapper_logic(termo_busca, max_resultados=6):
     empresas_sem_site = []
 
     async with async_playwright() as p:
@@ -17,40 +17,36 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=8):
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
                 '--disable-gpu',
-                '--single-process',
-                '--blink-settings=imagesEnabled=false' # Desativa imagens para velocidade máxima
+                '--no-first-run',
+                '--no-zygote',
+                '--single-process'
             ]
         )
+        
         try:
             context = await browser.new_context(
                 locale="pt-BR",
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
             
-            # Bloqueia fontes e mídias pesadas para não gastar tempo/processador
             page = await context.new_page()
+            
+            # Bloqueia APENAS imagens e fontes (mantém o CSS funcional)
             await page.route("**/*.{png,jpg,jpeg,svg,gif,woff,woff2}", lambda route: route.abort())
 
             url = f"https://www.google.com/maps/search/{termo_busca.replace(' ', '+')}"
-            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
 
-            # Tenta fechar banner de cookies rapidamente se existir
-            try:
-                btn_cookie = page.locator('button[aria-label*="Aceitar"]').first
-                if await btn_cookie.count() > 0:
-                    await btn_cookie.click(timeout=2000)
-            except Exception:
-                pass
-
+            # Aguarda a lista de resultados carregar
             painel = page.locator('div[role="feed"]')
             try:
-                await painel.wait_for(state="visible", timeout=8000)
+                await painel.wait_for(state="visible", timeout=10000)
             except Exception:
                 return empresas_sem_site
 
-            # Rola a lista apenas o necessário
-            await painel.evaluate("node => node.scrollBy(0, 1500)")
-            await asyncio.sleep(0.5)
+            # Scroll inicial
+            await painel.evaluate("node => node.scrollBy(0, 800)")
+            await asyncio.sleep(1)
 
             cards = page.locator('div[role="feed"] > div > div[role="article"]')
             total_cards = await cards.count()
@@ -58,33 +54,36 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=8):
             for i in range(min(total_cards, max_resultados)):
                 card = cards.nth(i)
                 try:
-                    await card.click()
-                    await asyncio.sleep(0.6) # Aguarda painel lateral carregar
+                    await card.click(timeout=5000)
+                    # Aguarda o painel de detalhes carregar as informações
+                    await asyncio.sleep(1.2)
 
-                    # Nome da empresa
+                    # 1. Nome da empresa
                     nome = "Não identificado"
                     h1 = page.locator('h1.DUwDvf').first
                     if await h1.count() > 0:
                         nome = (await h1.inner_text()).strip()
 
-                    # Verifica se possui botão/link de Website
+                    # 2. Checa se possui site
                     site_btn = page.locator('a[data-item-id="authority"]')
                     tem_site = await site_btn.count() > 0
 
                     if not tem_site:
-                        # Pega telefone
-                        tel_el = page.locator('button[data-item-id^="phone:tel:"]')
+                        # 3. Telefone
                         telefone = "Não informado"
+                        tel_el = page.locator('button[data-item-id^="phone:tel:"]')
                         if await tel_el.count() > 0:
                             lbl = await tel_el.get_attribute("aria-label")
-                            telefone = lbl.replace("Telefone: ", "").strip() if lbl else "Não informado"
+                            if lbl:
+                                telefone = lbl.replace("Telefone: ", "").strip()
 
-                        # Pega endereço
-                        end_el = page.locator('button[data-item-id="address"]')
+                        # 4. Endereço
                         endereco = "Não informado"
+                        end_el = page.locator('button[data-item-id="address"]')
                         if await end_el.count() > 0:
                             lbl = await end_el.get_attribute("aria-label")
-                            endereco = lbl.replace("Endereço: ", "").strip() if lbl else "Não informado"
+                            if lbl:
+                                endereco = lbl.replace("Endereço: ", "").strip()
 
                         empresas_sem_site.append({
                             "Nome": nome,
@@ -104,23 +103,22 @@ def index():
     return render_template('index.html')
 
 @app.route('/api/buscar', methods=['POST'])
-def buscar():
-    data = request.get_json()
+async def buscar():
+    data = request.get_json() or {}
     profissao = data.get('profissao', '')
     cidade = data.get('cidade', '')
 
     termo = f"{profissao} em {cidade}"
     
     try:
-        # Executa a busca assíncrona
-        resultados = asyncio.run(rodar_scrapper_logic(termo, max_resultados=8))
+        resultados = await rodar_scrapper_logic(termo, max_resultados=6)
         return jsonify(resultados)
     except Exception as e:
-        return jsonify({"erro": f"Falha na raspagem: {str(e)}"}), 500
+        return jsonify({"erro": f"Erro na raspagem: {str(e)}"}), 500
 
 @app.route('/api/download', methods=['POST'])
 def download():
-    data = request.get_json()
+    data = request.get_json() or []
     df = pd.DataFrame(data)
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -135,3 +133,6 @@ def download():
 
 if __name__ == '__main__':
     app.run(debug=True)
+
+    
+    # gunicorn -w 1 --timeout 120 app:app
