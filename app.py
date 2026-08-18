@@ -37,7 +37,15 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=15):
     empresas_sem_site = []
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu'
+            ]
+        )
         try:
             context = await browser.new_context(
                 locale="pt-BR",
@@ -59,7 +67,6 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=15):
                 await painel_resultados.wait_for(state="visible", timeout=15000)
             except Exception:
                 # feed não apareceu (bloqueio, captcha, sem resultados etc.)
-                await browser.close()
                 return empresas_sem_site
 
             # Scroll para carregar mais resultados
@@ -80,7 +87,7 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=15):
                     nomes_invalidos = {"resultados", "results", ""}
                     nome = "Não identificado"
 
-                    # 1) Classe específica do título no painel de detalhes (mais confiável)
+                    # 1) Classe específica do título no painel de detalhes
                     try:
                         h1_detalhe = page.locator('h1.DUwDvf').first
                         await h1_detalhe.wait_for(state="visible", timeout=8000)
@@ -90,7 +97,7 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=15):
                     except Exception:
                         pass
 
-                    # 2) Fallback: h1 genérico dentro do painel principal, só se não vier "Resultados"
+                    # 2) Fallback: h1 genérico dentro do painel principal
                     if nome == "Não identificado":
                         h1_el = page.locator('div[role="main"] h1').first
                         if await h1_el.count() > 0 and await h1_el.is_visible():
@@ -153,7 +160,6 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=15):
                 except Exception:
                     continue
         finally:
-            # garante que o browser fecha mesmo se algo der errado no meio
             await browser.close()
 
     return empresas_sem_site
@@ -176,7 +182,11 @@ def buscar():
     termo = f"{profissao} em {cidade}"
 
     try:
-        resultados = asyncio.run(rodar_scrapper_logic(termo))
+        # Cria e executa o loop assíncrono isolado para cada requisição
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        resultados = loop.run_until_complete(rodar_scrapper_logic(termo))
+        loop.close()
         return jsonify(resultados)
     except Exception as e:
         return jsonify({"erro": str(e)}), 500
@@ -204,5 +214,5 @@ def download():
 
 if __name__ == '__main__':
     os.makedirs('templates', exist_ok=True)
-    print("Servidor rodando em http://127.0.0.1:5000")
-    app.run(debug=True, port=5000)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=True)
