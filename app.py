@@ -1,4 +1,5 @@
 import asyncio
+import re
 from flask import Flask, render_template, request, jsonify, send_file
 from playwright.async_api import async_playwright
 import pandas as pd
@@ -6,7 +7,7 @@ import io
 
 app = Flask(__name__)
 
-async def rodar_scrapper_logic(termo_busca, max_resultados=6):
+async def rodar_scrapper_logic(termo_busca, max_resultados=8):
     empresas_sem_site = []
 
     async with async_playwright() as p:
@@ -31,7 +32,7 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=6):
             
             page = await context.new_page()
             
-            # Bloqueia apenas imagens e fontes para garantir velocidade sem quebrar o CSS
+            # Bloqueia imagens e fontes para economizar RAM e CPU
             await page.route("**/*.{png,jpg,jpeg,svg,gif,woff,woff2}", lambda route: route.abort())
 
             url = f"https://www.google.com/maps/search/{termo_busca.replace(' ', '+')}"
@@ -39,13 +40,14 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=6):
 
             painel = page.locator('div[role="feed"]')
             try:
-                await painel.wait_for(state="visible", timeout=10000)
+                await painel.wait_for(state="visible", timeout=12000)
             except Exception:
                 return empresas_sem_site
 
-            # Scroll no feed para carregar itens
-            await painel.evaluate("node => node.scrollBy(0, 800)")
-            await asyncio.sleep(1)
+            # Rola a lista para carregar mais itens
+            for _ in range(2):
+                await painel.evaluate("node => node.scrollBy(0, 1500)")
+                await asyncio.sleep(1)
 
             cards = page.locator('div[role="feed"] > div > div[role="article"]')
             total_cards = await cards.count()
@@ -53,35 +55,32 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=6):
             for i in range(min(total_cards, max_resultados)):
                 card = cards.nth(i)
                 try:
-                    await card.click(timeout=5000)
-                    await asyncio.sleep(1.2) # Aguarda painel lateral carregar dados
+                    # Captura todo o texto visível dentro do card do resultado
+                    texto_card = await card.inner_text()
+                    linhas = [linha.strip() for linha in texto_card.split('\n') if linha.strip()]
 
-                    # 1. Nome da empresa
-                    nome = "Não identificado"
-                    h1 = page.locator('h1.DUwDvf').first
-                    if await h1.count() > 0:
-                        nome = (await h1.inner_text()).strip()
+                    if not linhas:
+                        continue
 
-                    # 2. Verifica se possui site
-                    site_btn = page.locator('a[data-item-id="authority"]')
-                    tem_site = await site_btn.count() > 0
+                    # Verifica se o card tem o botão de website explicitamente
+                    tem_site_link = await card.locator('a[href*="http"]').count() > 0
+                    contem_palavra_site = "website" in texto_card.lower() or "site" in texto_card.lower()
 
-                    if not tem_site:
-                        # 3. Telefone
+                    if not tem_site_link and not contem_palavra_site:
+                        nome = linhas[0]  # O nome é sempre a primeira linha do card
+                        
+                        # Expressão regular para identificar telefone brasileiro
                         telefone = "Não informado"
-                        tel_el = page.locator('button[data-item-id^="phone:tel:"]')
-                        if await tel_el.count() > 0:
-                            lbl = await tel_el.get_attribute("aria-label")
-                            if lbl:
-                                telefone = lbl.replace("Telefone: ", "").strip()
+                        match_tel = re.search(r'\(?\d{2}\)?\s?\d{4,5}[-\s]?\d{4}', texto_card)
+                        if match_tel:
+                            telefone = match_tel.group(0)
 
-                        # 4. Endereço
+                        # Tenta obter o endereço a partir do texto das linhas restantes
                         endereco = "Não informado"
-                        end_el = page.locator('button[data-item-id="address"]')
-                        if await end_el.count() > 0:
-                            lbl = await end_el.get_attribute("aria-label")
-                            if lbl:
-                                endereco = lbl.replace("Endereço: ", "").strip()
+                        for linha in linhas[1:]:
+                            if ("Rua" in linha or "Av." in linha or "Avenida" in linha or "Alameda" in linha or "Praça" in linha or " - " in linha) and not ("Fechado" in linha or "Aberto" in linha or "★" in linha):
+                                endereco = linha
+                                break
 
                         empresas_sem_site.append({
                             "Nome": nome,
@@ -100,7 +99,6 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=6):
 def index():
     return render_template('index.html')
 
-# Rota mantida como def síncrona para compatibilidade com o Flask
 @app.route('/api/buscar', methods=['POST'])
 def buscar():
     data = request.get_json() or {}
@@ -110,10 +108,9 @@ def buscar():
     termo = f"{profissao} em {cidade}"
     
     try:
-        # Gerencia a execução do Playwright com evento limpo
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        resultados = loop.run_until_complete(rodar_scrapper_logic(termo, max_resultados=6))
+        resultados = loop.run_until_complete(rodar_scrapper_logic(termo, max_resultados=8))
         loop.close()
         return jsonify(resultados)
     except Exception as e:
@@ -136,5 +133,4 @@ def download():
 
 if __name__ == '__main__':
     app.run(debug=True)
-
     # gunicorn -w 1 --timeout 120 app:app
