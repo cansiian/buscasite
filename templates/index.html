@@ -19,7 +19,7 @@
     <div class="hero-section text-center">
         <div class="container">
             <h1 class="display-5 fw-bold">Buscador de Leads</h1>
-            <p class="lead">empresas no Google Maps que ainda não possuem website.</p>
+            <p class="lead">Empresas no Google Maps que ainda não possuem website.</p>
         </div>
     </div>
 
@@ -51,7 +51,7 @@
                     <div class="spinner-border text-primary" role="status" style="width: 3rem; height: 3rem;">
                         <span class="visually-hidden">Carregando...</span>
                     </div>
-                    <p class="mt-3 text-muted fw-bold">O robô está navegando no Google Maps...<br>Isso pode levar até 1 minuto.</p>
+                    <p class="mt-3 text-muted fw-bold">O robô está navegando no Google Maps...<br>Isso pode levar alguns segundos.</p>
                 </div>
 
                 <!-- Tabela de Resultados -->
@@ -59,7 +59,7 @@
                     <div class="d-flex justify-content-between align-items-center mb-3">
                         <h3 class="h5 mb-0">Empresas sem site encontradas (<span id="totalLeads">0</span>)</h3>
                         <button class="btn btn-success btn-sm fw-bold" onclick="baixarPlanilha()">
-                             Baixar Excel (.xlsx)
+                            Baixar Excel (.xlsx)
                         </button>
                     </div>
                     
@@ -120,24 +120,30 @@
             try {
                 const response = await fetch('/api/buscar', {
                     method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ profissao, cidade })
                 });
 
-                const data = await response.json();
-
-                if (data.erro) {
-                    throw new Error(data.erro);
+                // Checa se a resposta não é um JSON válido
+                const contentType = response.headers.get("content-type");
+                if (!contentType || !contentType.includes("application/json")) {
+                    throw new Error("O servidor demorou muito para responder ou ocorreu um erro interno.");
                 }
 
-                if (data.length === 0) {
+                const dados = await response.json();
+
+                if (dados.erro) {
+                    throw new Error(dados.erro);
+                }
+
+                if (dados.length === 0) {
                     erro.innerHTML = "Nenhuma empresa sem site foi encontrada para essa busca.";
                     erro.classList.remove('hidden');
                 } else {
-                    dadosAtuais = data;
-                    document.getElementById('totalLeads').innerText = data.length;
+                    dadosAtuais = dados;
+                    document.getElementById('totalLeads').innerText = dados.length;
                     
-                    data.forEach(empresa => {
+                    dados.forEach(empresa => {
                         const row = `<tr>
                             <td class="fw-bold">${empresa.Nome}</td>
                             <td>${empresa.Telefone}</td>

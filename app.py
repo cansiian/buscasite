@@ -33,7 +33,7 @@ async def aceitar_cookies_se_aparecer(page):
             continue
 
 
-async def rodar_scrapper_logic(termo_busca, max_resultados=15):
+async def rodar_scrapper_logic(termo_busca, max_resultados=10):
     empresas_sem_site = []
 
     async with async_playwright() as p:
@@ -43,36 +43,32 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=15):
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
-                '--disable-gpu'
+                '--disable-gpu',
+                '--single-process'
             ]
         )
         try:
             context = await browser.new_context(
                 locale="pt-BR",
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                ),
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
             page = await context.new_page()
 
             url = f"https://www.google.com/maps/search/{termo_busca.replace(' ', '+')}"
-            await page.goto(url, timeout=60000)
+            await page.goto(url, timeout=20000)
 
-            # Trata o banner de cookies, se aparecer
             await aceitar_cookies_se_aparecer(page)
 
             painel_resultados = page.locator('div[role="feed"]')
             try:
-                await painel_resultados.wait_for(state="visible", timeout=15000)
+                await painel_resultados.wait_for(state="visible", timeout=10000)
             except Exception:
-                # feed não apareceu (bloqueio, captcha, sem resultados etc.)
                 return empresas_sem_site
 
-            # Scroll para carregar mais resultados
-            for _ in range(4):
-                await painel_resultados.evaluate("node => node.scrollBy(0, 1200)")
-                await asyncio.sleep(1.2)
+            # Scroll mais rápido
+            for _ in range(2):
+                await painel_resultados.evaluate("node => node.scrollBy(0, 1000)")
+                await asyncio.sleep(0.8)
 
             cards = page.locator('div[role="feed"] div[role="article"]')
             total_cards = await cards.count()
@@ -81,82 +77,33 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=15):
                 card = cards.nth(i)
                 try:
                     await card.click()
-                    await pausa_humana(1.5, 3.0)
+                    await asyncio.sleep(1.0) # Pausa mais curta para economizar tempo
 
-                    # --- CAPTURA RESISTENTE DO NOME DA EMPRESA ---
-                    nomes_invalidos = {"resultados", "results", ""}
                     nome = "Não identificado"
-
-                    # 1) Classe específica do título no painel de detalhes
                     try:
                         h1_detalhe = page.locator('h1.DUwDvf').first
-                        await h1_detalhe.wait_for(state="visible", timeout=8000)
-                        candidato = (await h1_detalhe.inner_text()).strip()
-                        if candidato.lower() not in nomes_invalidos:
-                            nome = candidato
+                        if await h1_detalhe.count() > 0:
+                            nome = (await h1_detalhe.inner_text()).strip()
                     except Exception:
                         pass
 
-                    # 2) Fallback: h1 genérico dentro do painel principal
-                    if nome == "Não identificado":
-                        h1_el = page.locator('div[role="main"] h1').first
-                        if await h1_el.count() > 0 and await h1_el.is_visible():
-                            candidato = (await h1_el.inner_text()).strip()
-                            if candidato.lower() not in nomes_invalidos:
-                                nome = candidato
-
-                    # 3) Fallback: outra classe antiga de título do Maps
-                    if nome == "Não identificado":
-                        alt_el = page.locator('h1.fontHeadlineLarge').first
-                        if await alt_el.count() > 0:
-                            candidato = (await alt_el.inner_text()).strip()
-                            if candidato.lower() not in nomes_invalidos:
-                                nome = candidato
-
-                    # 4) Último recurso: aria-label do próprio card na lista
-                    if nome == "Não identificado":
-                        label_card = await card.get_attribute("aria-label")
-                        if label_card and label_card.strip().lower() not in nomes_invalidos:
-                            nome = label_card.strip()
-
-                    # Checa se possui botão de site
                     site_el = page.locator('a[data-item-id="authority"]')
                     tem_site = await site_el.count() > 0
 
                     if not tem_site:
-                        # Telefone
                         tel_el = page.locator('button[data-item-id^="phone:tel:"]')
-                        telefone = (
-                            await tel_el.get_attribute("aria-label")
-                            if await tel_el.count() > 0
-                            else "Não informado"
-                        )
-                        telefone = (
-                            telefone.replace("Telefone: ", "")
-                            if telefone
-                            else "Não informado"
-                        )
+                        telefone = await tel_el.get_attribute("aria-label") if await tel_el.count() > 0 else "Não informado"
+                        telefone = telefone.replace("Telefone: ", "") if telefone else "Não informado"
 
-                        # Endereço
                         end_el = page.locator('button[data-item-id="address"]')
-                        endereco = (
-                            await end_el.get_attribute("aria-label")
-                            if await end_el.count() > 0
-                            else "Não informado"
-                        )
-                        endereco = (
-                            endereco.replace("Endereço: ", "")
-                            if endereco
-                            else "Não informado"
-                        )
+                        endereco = await end_el.get_attribute("aria-label") if await end_el.count() > 0 else "Não informado"
+                        endereco = endereco.replace("Endereço: ", "") if endereco else "Não informado"
 
-                        empresas_sem_site.append(
-                            {
-                                "Nome": nome,
-                                "Telefone": telefone,
-                                "Endereço": endereco,
-                            }
-                        )
+                        empresas_sem_site.append({
+                            "Nome": nome,
+                            "Telefone": telefone,
+                            "Endereço": endereco
+                        })
                 except Exception:
                     continue
         finally:
