@@ -57,7 +57,7 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=10):
             except Exception:
                 pass
 
-            # Scroll suave para carregar os elementos e telefones nos cards
+            # Scroll suave para carregar os elementos
             try:
                 for _ in range(3):
                     await page.mouse.wheel(0, 1500)
@@ -101,13 +101,12 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=10):
                     if not has_website:
                         nome = linhas[0] if len(linhas) > 0 else "Não identificado"
                         
-                        # 1. Tenta extrair o telefone via expressão regular no texto
+                        # 1. Telefone
                         telefone = "Não informado"
                         match_tel = re.search(r'\(?\d{2}\)?\s?\d{4,5}[-\s]?\d{4}', texto_card)
                         if match_tel:
                             telefone = match_tel.group(0)
                         else:
-                            # 2. Busca no atributo HTML oculto dos botões de chamada/telefone do card
                             btn_tel = card.locator('button[aria-label*="Telefone"], [data-tooltip*="Telefone"], button[aria-label*="Ligar"]')
                             if await btn_tel.count() > 0:
                                 label_tel = await btn_tel.first.get_attribute("aria-label") or ""
@@ -115,22 +114,37 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=10):
                                 if match_btn:
                                     telefone = match_btn.group(0)
 
-                        # Extração do Endereço
+                        # 2. Endereço (filtragem refinada)
                         endereco = "Não informado"
-                        for linha in linhas[1:]:
-                            # Identifica padrões comuns de endereço no Brasil
-                            if any(term in linha.lower() for term in ["rua", "av.", "avenida", "alameda", "praça", "rodovia", "estrada", "bairro", " - "]) and not any(ign in linha.lower() for ign in ["fechado", "aberto", "★", "avaliações", "estrelas"]):
-                                endereco = linha
-                                break
+                        
+                        # Palavras e termos a ignorar (categorias, status, notas e o próprio nome)
+                        palavras_ignore = [
+                            nome.lower(), "fechado", "aberto", "★", "estrelas", "avaliações", 
+                            "minuto", "hora", "opções no local", "compras na loja", 
+                            "retirada na porta", "entrega", "serviço", "contador", 
+                            "escritório", "contabilidade", "loja", "consultoria"
+                        ]
 
-                        # Se o endereço continuar não informado, tenta pegar da segunda/terceira linha útil
-                        if endereco == "Não informado" and len(linhas) > 2:
-                            for linha in linhas[1:]:
-                                if not any(ign in linha.lower() for ign in ["fechado", "aberto", "★", "avaliações", "estrelas", "minuto", "hora"]) and len(linha) > 8:
+                        for linha in linhas[1:]:
+                            linha_lower = linha.lower()
+                            
+                            # Se a linha contiver palavras de endereço comuns
+                            if any(p in linha_lower for p in ["rua", "av.", "avenida", "alameda", "praça", "rodovia", "estrada", "bairro", " - ", " nº", " nº ", " n°"]):
+                                if not any(ign in linha_lower for ign in ["fechado", "aberto", "★", "avaliações"]):
                                     endereco = linha
                                     break
+                        
+                        # Fallback: Se não encontrou por palavra-chave, pega a linha que não bate com nome nem categoria
+                        if endereco == "Não informado":
+                            for linha in linhas[1:]:
+                                linha_lower = linha.lower()
+                                if not any(ign in linha_lower for ign in palavras_ignore) and len(linha) > 8:
+                                    # Garante que não é apenas a repetição do telefone
+                                    if not re.search(r'\(?\d{2}\)?\s?\d{4,5}[-\s]?\d{4}', linha):
+                                        endereco = linha
+                                        break
 
-                        # Evita cadastrar a mesma empresa duas vezes
+                        # Evita cadastrar duplicados
                         if not any(e['Nome'] == nome for e in empresas_sem_site):
                             empresas_sem_site.append({
                                 "Nome": nome,
