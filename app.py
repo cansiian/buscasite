@@ -1,39 +1,12 @@
-from flask import Flask, render_template, request, jsonify, send_file
 import asyncio
-import random
-import pandas as pd
-import os
-import io
+from flask import Flask, render_template, request, jsonify, send_file
 from playwright.async_api import async_playwright
+import pandas as pd
+import io
 
 app = Flask(__name__)
 
-
-async def pausa_humana(min_seg=1.0, max_seg=2.5):
-    tempo = random.uniform(min_seg, max_seg)
-    await asyncio.sleep(tempo)
-
-
-async def aceitar_cookies_se_aparecer(page):
-    """Google costuma mostrar um banner de consentimento antes do mapa carregar."""
-    seletores_possiveis = [
-        'button:has-text("Aceitar tudo")',
-        'button:has-text("Accept all")',
-        'button[aria-label="Aceitar tudo"]',
-        'form[action*="consent"] button',
-    ]
-    for seletor in seletores_possiveis:
-        try:
-            botao = page.locator(seletor).first
-            if await botao.count() > 0 and await botao.is_visible():
-                await botao.click()
-                await pausa_humana(0.5, 1.0)
-                return
-        except Exception:
-            continue
-
-
-async def rodar_scrapper_logic(termo_busca, max_resultados=10):
+async def rodar_scrapper_logic(termo_busca, max_resultados=8):
     empresas_sem_site = []
 
     async with async_playwright() as p:
@@ -44,60 +17,74 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=10):
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
                 '--disable-gpu',
-                '--single-process'
+                '--single-process',
+                '--blink-settings=imagesEnabled=false' # Desativa imagens para velocidade máxima
             ]
         )
         try:
             context = await browser.new_context(
                 locale="pt-BR",
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             )
+            
+            # Bloqueia fontes e mídias pesadas para não gastar tempo/processador
             page = await context.new_page()
+            await page.route("**/*.{png,jpg,jpeg,svg,gif,woff,woff2}", lambda route: route.abort())
 
             url = f"https://www.google.com/maps/search/{termo_busca.replace(' ', '+')}"
-            await page.goto(url, timeout=20000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
 
-            await aceitar_cookies_se_aparecer(page)
-
-            painel_resultados = page.locator('div[role="feed"]')
+            # Tenta fechar banner de cookies rapidamente se existir
             try:
-                await painel_resultados.wait_for(state="visible", timeout=10000)
+                btn_cookie = page.locator('button[aria-label*="Aceitar"]').first
+                if await btn_cookie.count() > 0:
+                    await btn_cookie.click(timeout=2000)
+            except Exception:
+                pass
+
+            painel = page.locator('div[role="feed"]')
+            try:
+                await painel.wait_for(state="visible", timeout=8000)
             except Exception:
                 return empresas_sem_site
 
-            # Scroll mais rápido
-            for _ in range(2):
-                await painel_resultados.evaluate("node => node.scrollBy(0, 1000)")
-                await asyncio.sleep(0.8)
+            # Rola a lista apenas o necessário
+            await painel.evaluate("node => node.scrollBy(0, 1500)")
+            await asyncio.sleep(0.5)
 
-            cards = page.locator('div[role="feed"] div[role="article"]')
+            cards = page.locator('div[role="feed"] > div > div[role="article"]')
             total_cards = await cards.count()
 
             for i in range(min(total_cards, max_resultados)):
                 card = cards.nth(i)
                 try:
                     await card.click()
-                    await asyncio.sleep(1.0) # Pausa mais curta para economizar tempo
+                    await asyncio.sleep(0.6) # Aguarda painel lateral carregar
 
+                    # Nome da empresa
                     nome = "Não identificado"
-                    try:
-                        h1_detalhe = page.locator('h1.DUwDvf').first
-                        if await h1_detalhe.count() > 0:
-                            nome = (await h1_detalhe.inner_text()).strip()
-                    except Exception:
-                        pass
+                    h1 = page.locator('h1.DUwDvf').first
+                    if await h1.count() > 0:
+                        nome = (await h1.inner_text()).strip()
 
-                    site_el = page.locator('a[data-item-id="authority"]')
-                    tem_site = await site_el.count() > 0
+                    # Verifica se possui botão/link de Website
+                    site_btn = page.locator('a[data-item-id="authority"]')
+                    tem_site = await site_btn.count() > 0
 
                     if not tem_site:
+                        # Pega telefone
                         tel_el = page.locator('button[data-item-id^="phone:tel:"]')
-                        telefone = await tel_el.get_attribute("aria-label") if await tel_el.count() > 0 else "Não informado"
-                        telefone = telefone.replace("Telefone: ", "") if telefone else "Não informado"
+                        telefone = "Não informado"
+                        if await tel_el.count() > 0:
+                            lbl = await tel_el.get_attribute("aria-label")
+                            telefone = lbl.replace("Telefone: ", "").strip() if lbl else "Não informado"
 
+                        # Pega endereço
                         end_el = page.locator('button[data-item-id="address"]')
-                        endereco = await end_el.get_attribute("aria-label") if await end_el.count() > 0 else "Não informado"
-                        endereco = endereco.replace("Endereço: ", "") if endereco else "Não informado"
+                        endereco = "Não informado"
+                        if await end_el.count() > 0:
+                            lbl = await end_el.get_attribute("aria-label")
+                            endereco = lbl.replace("Endereço: ", "").strip() if lbl else "Não informado"
 
                         empresas_sem_site.append({
                             "Nome": nome,
@@ -106,60 +93,45 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=10):
                         })
                 except Exception:
                     continue
+
         finally:
             await browser.close()
 
     return empresas_sem_site
 
-
 @app.route('/')
 def index():
     return render_template('index.html')
 
-
 @app.route('/api/buscar', methods=['POST'])
 def buscar():
-    data = request.get_json(silent=True) or {}
-    profissao = data.get('profissao')
-    cidade = data.get('cidade')
-
-    if not profissao or not cidade:
-        return jsonify({"erro": "Preencha todos os campos."}), 400
+    data = request.get_json()
+    profissao = data.get('profissao', '')
+    cidade = data.get('cidade', '')
 
     termo = f"{profissao} em {cidade}"
-
+    
     try:
-        # Cria e executa o loop assíncrono isolado para cada requisição
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        resultados = loop.run_until_complete(rodar_scrapper_logic(termo))
-        loop.close()
+        # Executa a busca assíncrona
+        resultados = asyncio.run(rodar_scrapper_logic(termo, max_resultados=8))
         return jsonify(resultados)
     except Exception as e:
-        return jsonify({"erro": str(e)}), 500
-
+        return jsonify({"erro": f"Falha na raspagem: {str(e)}"}), 500
 
 @app.route('/api/download', methods=['POST'])
 def download():
-    data = request.get_json(silent=True)
-    if not data:
-        return jsonify({"erro": "Nenhum dado para baixar."}), 400
-
+    data = request.get_json()
     df = pd.DataFrame(data)
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Leads')
     output.seek(0)
-
     return send_file(
         output,
         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         as_attachment=True,
-        download_name='leads_sem_site.xlsx',
+        download_name='leads_sem_site.xlsx'
     )
 
-
 if __name__ == '__main__':
-    os.makedirs('templates', exist_ok=True)
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    app.run(debug=True)
