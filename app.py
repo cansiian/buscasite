@@ -33,7 +33,7 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=8):
             
             page = await context.new_page()
 
-            # Esconde flag de automação do robô
+            # Esconde a flag de automação
             await page.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', {
                     get: () => undefined
@@ -43,7 +43,7 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=8):
             url = f"https://www.google.com/maps/search/{termo_busca.replace(' ', '+')}"
             await page.goto(url, wait_until="networkidle", timeout=25000)
 
-            # Aceitar cookies se houver
+            # Aceita cookies se o banner estiver visível
             try:
                 btn_aceitar = page.locator('button:has-text("Aceitar tudo"), button:has-text("Concordo")')
                 if await btn_aceitar.count() > 0:
@@ -57,7 +57,6 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=8):
             except Exception:
                 pass
 
-            # Rola para carregar os cards
             try:
                 await page.mouse.wheel(0, 1000)
                 await asyncio.sleep(1)
@@ -78,7 +77,12 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=8):
                     if not texto_card or len(texto_card.strip()) < 3:
                         continue
 
-                    # 1. Verifica no card do feed se tem site
+                    linhas = [l.strip() for l in texto_card.split('\n') if l.strip()]
+
+                    # Pega o nome REAL diretamente da primeira linha do card no feed
+                    nome_card = linhas[0] if len(linhas) > 0 else "Não identificado"
+
+                    # Checa presença de site no card
                     has_website = False
                     links = card.locator('a')
                     num_links = await links.count()
@@ -95,20 +99,12 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=8):
                     if 'website' in texto_card.lower() or 'site' in texto_card.lower():
                         has_website = True
 
-                    # Se NÃO tem site, clica para extrair os detalhes exatos
+                    # Se a empresa não tem site, entra no detalhe para pegar o endereço e telefone precisos
                     if not has_website:
                         await card.click(timeout=3000)
-                        await asyncio.sleep(1.2) # Aguarda painel lateral carregar
+                        await asyncio.sleep(1.2)
 
-                        # Extrai Nome do cabeçalho H1 do painel lateral
-                        nome = "Não identificado"
-                        h1 = page.locator('h1.DUwDvf, h1').first
-                        if await h1.count() > 0:
-                            nome_text = (await h1.inner_text()).strip()
-                            if nome_text:
-                                nome = nome_text
-
-                        # Extrai Endereço do atributo aria-label do botão de endereço
+                        # Endereço: busca pelo botão oficial do Maps
                         endereco = "Não informado"
                         btn_end = page.locator('button[data-item-id="address"]')
                         if await btn_end.count() > 0:
@@ -116,25 +112,22 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=8):
                             if aria_end:
                                 endereco = aria_end.replace("Endereço: ", "").replace("Endereço ; ", "").strip()
 
-                        # Extrai Telefone do botão de chamada
+                        # Telefone: tenta primeiro o botão e depois via Regex
                         telefone = "Não informado"
                         btn_tel = page.locator('button[data-item-id^="phone:tel:"]')
                         if await btn_tel.count() > 0:
                             aria_tel = await btn_tel.get_attribute("aria-label") or ""
                             if aria_tel:
                                 telefone = aria_tel.replace("Telefone: ", "").strip()
-                        else:
-                            # Tenta via regex no painel lateral
-                            painel_detalhes = page.locator('div[role="main"]')
-                            if await painel_detalhes.count() > 0:
-                                txt_detalhes = await painel_detalhes.inner_text()
-                                match_tel = re.search(r'\(?\d{2}\)?\s?\d{4,5}[-\s]?\d{4}', txt_detalhes)
-                                if match_tel:
-                                    telefone = match_tel.group(0)
+                        
+                        if telefone == "Não informado":
+                            match_tel = re.search(r'\(?\d{2}\)?\s?\d{4,5}[-\s]?\d{4}', texto_card)
+                            if match_tel:
+                                telefone = match_tel.group(0)
 
-                        if not any(e['Nome'] == nome for e in empresas_sem_site):
+                        if not any(e['Nome'] == nome_card for e in empresas_sem_site):
                             empresas_sem_site.append({
-                                "Nome": nome,
+                                "Nome": nome_card,
                                 "Telefone": telefone,
                                 "Endereço": endereco
                             })
