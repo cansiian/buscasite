@@ -7,7 +7,7 @@ import io
 
 app = Flask(__name__)
 
-async def rodar_scrapper_logic(termo_busca, max_resultados=10):
+async def rodar_scrapper_logic(termo_busca, max_resultados=8):
     empresas_sem_site = []
 
     async with async_playwright() as p:
@@ -33,7 +33,7 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=10):
             
             page = await context.new_page()
 
-            # Esconde a flag de automação
+            # Esconde flag de automação do robô
             await page.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', {
                     get: () => undefined
@@ -43,7 +43,7 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=10):
             url = f"https://www.google.com/maps/search/{termo_busca.replace(' ', '+')}"
             await page.goto(url, wait_until="networkidle", timeout=25000)
 
-            # Fecha banner de consentimento de cookies, se houver
+            # Aceitar cookies se houver
             try:
                 btn_aceitar = page.locator('button:has-text("Aceitar tudo"), button:has-text("Concordo")')
                 if await btn_aceitar.count() > 0:
@@ -57,11 +57,10 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=10):
             except Exception:
                 pass
 
-            # Scroll suave para carregar os elementos
+            # Rola para carregar os cards
             try:
-                for _ in range(3):
-                    await page.mouse.wheel(0, 1500)
-                    await asyncio.sleep(1)
+                await page.mouse.wheel(0, 1000)
+                await asyncio.sleep(1)
             except Exception:
                 pass
 
@@ -76,12 +75,10 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=10):
                 card = cards.nth(i)
                 try:
                     texto_card = await card.inner_text()
-                    if not texto_card or len(texto_card.strip()) < 5:
+                    if not texto_card or len(texto_card.strip()) < 3:
                         continue
 
-                    linhas = [l.strip() for l in texto_card.split('\n') if l.strip()]
-
-                    # Checa presença de site no card
+                    # 1. Verifica no card do feed se tem site
                     has_website = False
                     links = card.locator('a')
                     num_links = await links.count()
@@ -98,53 +95,43 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=10):
                     if 'website' in texto_card.lower() or 'site' in texto_card.lower():
                         has_website = True
 
+                    # Se NÃO tem site, clica para extrair os detalhes exatos
                     if not has_website:
-                        nome = linhas[0] if len(linhas) > 0 else "Não identificado"
-                        
-                        # 1. Telefone
-                        telefone = "Não informado"
-                        match_tel = re.search(r'\(?\d{2}\)?\s?\d{4,5}[-\s]?\d{4}', texto_card)
-                        if match_tel:
-                            telefone = match_tel.group(0)
-                        else:
-                            btn_tel = card.locator('button[aria-label*="Telefone"], [data-tooltip*="Telefone"], button[aria-label*="Ligar"]')
-                            if await btn_tel.count() > 0:
-                                label_tel = await btn_tel.first.get_attribute("aria-label") or ""
-                                match_btn = re.search(r'\(?\d{2}\)?\s?\d{4,5}[-\s]?\d{4}', label_tel)
-                                if match_btn:
-                                    telefone = match_btn.group(0)
+                        await card.click(timeout=3000)
+                        await asyncio.sleep(1.2) # Aguarda painel lateral carregar
 
-                        # 2. Endereço (filtragem refinada)
+                        # Extrai Nome do cabeçalho H1 do painel lateral
+                        nome = "Não identificado"
+                        h1 = page.locator('h1.DUwDvf, h1').first
+                        if await h1.count() > 0:
+                            nome_text = (await h1.inner_text()).strip()
+                            if nome_text:
+                                nome = nome_text
+
+                        # Extrai Endereço do atributo aria-label do botão de endereço
                         endereco = "Não informado"
-                        
-                        # Palavras e termos a ignorar (categorias, status, notas e o próprio nome)
-                        palavras_ignore = [
-                            nome.lower(), "fechado", "aberto", "★", "estrelas", "avaliações", 
-                            "minuto", "hora", "opções no local", "compras na loja", 
-                            "retirada na porta", "entrega", "serviço", "contador", 
-                            "escritório", "contabilidade", "loja", "consultoria"
-                        ]
+                        btn_end = page.locator('button[data-item-id="address"]')
+                        if await btn_end.count() > 0:
+                            aria_end = await btn_end.get_attribute("aria-label") or ""
+                            if aria_end:
+                                endereco = aria_end.replace("Endereço: ", "").replace("Endereço ; ", "").strip()
 
-                        for linha in linhas[1:]:
-                            linha_lower = linha.lower()
-                            
-                            # Se a linha contiver palavras de endereço comuns
-                            if any(p in linha_lower for p in ["rua", "av.", "avenida", "alameda", "praça", "rodovia", "estrada", "bairro", " - ", " nº", " nº ", " n°"]):
-                                if not any(ign in linha_lower for ign in ["fechado", "aberto", "★", "avaliações"]):
-                                    endereco = linha
-                                    break
-                        
-                        # Fallback: Se não encontrou por palavra-chave, pega a linha que não bate com nome nem categoria
-                        if endereco == "Não informado":
-                            for linha in linhas[1:]:
-                                linha_lower = linha.lower()
-                                if not any(ign in linha_lower for ign in palavras_ignore) and len(linha) > 8:
-                                    # Garante que não é apenas a repetição do telefone
-                                    if not re.search(r'\(?\d{2}\)?\s?\d{4,5}[-\s]?\d{4}', linha):
-                                        endereco = linha
-                                        break
+                        # Extrai Telefone do botão de chamada
+                        telefone = "Não informado"
+                        btn_tel = page.locator('button[data-item-id^="phone:tel:"]')
+                        if await btn_tel.count() > 0:
+                            aria_tel = await btn_tel.get_attribute("aria-label") or ""
+                            if aria_tel:
+                                telefone = aria_tel.replace("Telefone: ", "").strip()
+                        else:
+                            # Tenta via regex no painel lateral
+                            painel_detalhes = page.locator('div[role="main"]')
+                            if await painel_detalhes.count() > 0:
+                                txt_detalhes = await painel_detalhes.inner_text()
+                                match_tel = re.search(r'\(?\d{2}\)?\s?\d{4,5}[-\s]?\d{4}', txt_detalhes)
+                                if match_tel:
+                                    telefone = match_tel.group(0)
 
-                        # Evita cadastrar duplicados
                         if not any(e['Nome'] == nome for e in empresas_sem_site):
                             empresas_sem_site.append({
                                 "Nome": nome,
@@ -174,7 +161,7 @@ def buscar():
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        resultados = loop.run_until_complete(rodar_scrapper_logic(termo, max_resultados=10))
+        resultados = loop.run_until_complete(rodar_scrapper_logic(termo, max_resultados=8))
         loop.close()
         return jsonify(resultados)
     except Exception as e:
@@ -197,4 +184,3 @@ def download():
 
 if __name__ == '__main__':
     app.run(debug=True)
-    # gunicorn -w 1 --timeout 120 app:app
