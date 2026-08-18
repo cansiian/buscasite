@@ -11,7 +11,6 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=10):
     empresas_sem_site = []
 
     async with async_playwright() as p:
-        # Lança o Chromium com argumentos para desativar a detecção de automação
         browser = await p.chromium.launch(
             headless=True,
             args=[
@@ -25,7 +24,6 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=10):
         )
         
         try:
-            # Emula um navegador desktop completo em português do Brasil
             context = await browser.new_context(
                 locale="pt-BR",
                 timezone_id="America/Sao_Paulo",
@@ -35,7 +33,7 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=10):
             
             page = await context.new_page()
 
-            # Remove a propriedade 'navigator.webdriver' para esconder que é um robô
+            # Esconde a flag de automação
             await page.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', {
                     get: () => undefined
@@ -45,23 +43,21 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=10):
             url = f"https://www.google.com/maps/search/{termo_busca.replace(' ', '+')}"
             await page.goto(url, wait_until="networkidle", timeout=25000)
 
-            # Tenta aceitar termos/cookies caso apareça tela intermediária
+            # Fecha banner de consentimento de cookies, se houver
             try:
                 btn_aceitar = page.locator('button:has-text("Aceitar tudo"), button:has-text("Concordo")')
                 if await btn_aceitar.count() > 0:
-                    await btn_aceitar.first.click(timeout=3000)
+                    await btn_aceitar.first.click(timeout=2000)
             except Exception:
                 pass
 
-            # Aguarda a área principal de resultados carregar
             painel = page.locator('div[role="feed"]')
             try:
                 await painel.wait_for(state="visible", timeout=12000)
             except Exception:
-                # Caso o seletor 'role=feed' falhe devido a layout alternativo, busca por artigos
                 pass
 
-            # Scroll no painel
+            # Scroll suave para carregar os elementos e telefones nos cards
             try:
                 for _ in range(3):
                     await page.mouse.wheel(0, 1500)
@@ -69,13 +65,11 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=10):
             except Exception:
                 pass
 
-            # Localiza os cards de empresa
-            cards = page.locator('div[role="article"], a[href*="/maps/place/"]')
+            cards = page.locator('div[role="feed"] > div > div[role="article"]')
             total_cards = await cards.count()
 
             if total_cards == 0:
-                # Tenta seletor genérico fallback se o Google alterar o layout
-                cards = page.locator('div.Nv231b, div.m6QE1c')
+                cards = page.locator('div[role="article"]')
                 total_cards = await cards.count()
 
             for i in range(min(total_cards, max_resultados)):
@@ -87,10 +81,8 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=10):
 
                     linhas = [l.strip() for l in texto_card.split('\n') if l.strip()]
 
-                    # Verifica presença de link/botão para website
+                    # Checa presença de site no card
                     has_website = False
-                    
-                    # Checa links internos do card
                     links = card.locator('a')
                     num_links = await links.count()
                     for l_idx in range(num_links):
@@ -106,24 +98,39 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=10):
                     if 'website' in texto_card.lower() or 'site' in texto_card.lower():
                         has_website = True
 
-                    # Se a empresa NÃO tem site, extrai os dados
                     if not has_website:
                         nome = linhas[0] if len(linhas) > 0 else "Não identificado"
                         
-                        # Extrai telefone por Regex
+                        # 1. Tenta extrair o telefone via expressão regular no texto
                         telefone = "Não informado"
                         match_tel = re.search(r'\(?\d{2}\)?\s?\d{4,5}[-\s]?\d{4}', texto_card)
                         if match_tel:
                             telefone = match_tel.group(0)
+                        else:
+                            # 2. Busca no atributo HTML oculto dos botões de chamada/telefone do card
+                            btn_tel = card.locator('button[aria-label*="Telefone"], [data-tooltip*="Telefone"], button[aria-label*="Ligar"]')
+                            if await btn_tel.count() > 0:
+                                label_tel = await btn_tel.first.get_attribute("aria-label") or ""
+                                match_btn = re.search(r'\(?\d{2}\)?\s?\d{4,5}[-\s]?\d{4}', label_tel)
+                                if match_btn:
+                                    telefone = match_btn.group(0)
 
-                        # Extrai endereço
+                        # Extração do Endereço
                         endereco = "Não informado"
                         for linha in linhas[1:]:
-                            if any(term in linha for term in ["Rua", "Av.", "Avenida", "Alameda", "Praça", " - "]) and not any(ign in linha for ign in ["Fechado", "Aberto", "★", "avaliações"]):
+                            # Identifica padrões comuns de endereço no Brasil
+                            if any(term in linha.lower() for term in ["rua", "av.", "avenida", "alameda", "praça", "rodovia", "estrada", "bairro", " - "]) and not any(ign in linha.lower() for ign in ["fechado", "aberto", "★", "avaliações", "estrelas"]):
                                 endereco = linha
                                 break
 
-                        # Evita duplicados pelo nome
+                        # Se o endereço continuar não informado, tenta pegar da segunda/terceira linha útil
+                        if endereco == "Não informado" and len(linhas) > 2:
+                            for linha in linhas[1:]:
+                                if not any(ign in linha.lower() for ign in ["fechado", "aberto", "★", "avaliações", "estrelas", "minuto", "hora"]) and len(linha) > 8:
+                                    endereco = linha
+                                    break
+
+                        # Evita cadastrar a mesma empresa duas vezes
                         if not any(e['Nome'] == nome for e in empresas_sem_site):
                             empresas_sem_site.append({
                                 "Nome": nome,
