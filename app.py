@@ -1,11 +1,26 @@
 import asyncio
-import re
-from flask import Flask, render_template, request, jsonify, send_file
-from playwright.async_api import async_playwright
-import pandas as pd
 import io
+import re
+from flask import Flask, jsonify, render_template, request, send_file
+import pandas as pd
+from playwright.async_api import async_playwright
 
 app = Flask(__name__)
+
+
+def gerar_link_whatsapp(telefone):
+    if not telefone or telefone == "Não informado":
+        return None
+
+    # Remove qualquer caractere que não seja número
+    apenas_numeros = re.sub(r"\D", "", telefone)
+
+    # Se tiver DDD + número (ex: 51999999999 - 10 ou 11 dígitos), adiciona o DDI 55
+    if len(apenas_numeros) in (10, 11):
+        apenas_numeros = f"55{apenas_numeros}"
+
+    return f"https://wa.me/{apenas_numeros}"
+
 
 async def rodar_scrapper_logic(termo_busca, max_resultados=10):
     empresas_sem_site = []
@@ -14,23 +29,23 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=10):
         browser = await p.chromium.launch(
             headless=True,
             args=[
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-blink-features=AutomationControlled',
-                '--disable-gpu',
-                '--no-first-run'
-            ]
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-gpu",
+                "--no-first-run",
+            ],
         )
-        
+
         try:
             context = await browser.new_context(
                 locale="pt-BR",
                 timezone_id="America/Sao_Paulo",
                 viewport={"width": 1280, "height": 800},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             )
-            
+
             page = await context.new_page()
 
             # Esconde a flag de automação
@@ -45,7 +60,9 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=10):
 
             # Fecha banner de consentimento de cookies, se houver
             try:
-                btn_aceitar = page.locator('button:has-text("Aceitar tudo"), button:has-text("Concordo")')
+                btn_aceitar = page.locator(
+                    'button:has-text("Aceitar tudo"), button:has-text("Concordo")'
+                )
                 if await btn_aceitar.count() > 0:
                     await btn_aceitar.first.click(timeout=2000)
             except Exception:
@@ -79,78 +96,151 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=10):
                     if not texto_card or len(texto_card.strip()) < 5:
                         continue
 
-                    linhas = [l.strip() for l in texto_card.split('\n') if l.strip()]
+                    linhas = [
+                        l.strip() for l in texto_card.split("\n") if l.strip()
+                    ]
 
                     # Checa presença de site no card
                     has_website = False
-                    links = card.locator('a')
+                    links = card.locator("a")
                     num_links = await links.count()
                     for l_idx in range(num_links):
-                        href = await links.nth(l_idx).get_attribute('href') or ''
-                        aria_label = await links.nth(l_idx).get_attribute('aria-label') or ''
-                        if 'http' in href and not 'google.com/maps' in href:
+                        href = (
+                            await links.nth(l_idx).get_attribute("href") or ""
+                        )
+                        aria_label = (
+                            await links.nth(l_idx).get_attribute("aria-label")
+                            or ""
+                        )
+                        if "http" in href and not "google.com/maps" in href:
                             has_website = True
                             break
-                        if 'website' in aria_label.lower() or 'site' in aria_label.lower():
+                        if (
+                            "website" in aria_label.lower()
+                            or "site" in aria_label.lower()
+                        ):
                             has_website = True
                             break
 
-                    if 'website' in texto_card.lower() or 'site' in texto_card.lower():
+                    if (
+                        "website" in texto_card.lower()
+                        or "site" in texto_card.lower()
+                    ):
                         has_website = True
 
                     if not has_website:
-                        nome = linhas[0] if len(linhas) > 0 else "Não identificado"
-                        
+                        nome = (
+                            linhas[0]
+                            if len(linhas) > 0
+                            else "Não identificado"
+                        )
+
                         # 1. Telefone
                         telefone = "Não informado"
-                        match_tel = re.search(r'\(?\d{2}\)?\s?\d{4,5}[-\s]?\d{4}', texto_card)
+                        match_tel = re.search(
+                            r"\(?\d{2}\)?\s?\d{4,5}[-\s]?\d{4}", texto_card
+                        )
                         if match_tel:
                             telefone = match_tel.group(0)
                         else:
-                            btn_tel = card.locator('button[aria-label*="Telefone"], [data-tooltip*="Telefone"], button[aria-label*="Ligar"]')
+                            btn_tel = card.locator(
+                                'button[aria-label*="Telefone"], [data-tooltip*="Telefone"], button[aria-label*="Ligar"]'
+                            )
                             if await btn_tel.count() > 0:
-                                label_tel = await btn_tel.first.get_attribute("aria-label") or ""
-                                match_btn = re.search(r'\(?\d{2}\)?\s?\d{4,5}[-\s]?\d{4}', label_tel)
+                                label_tel = (
+                                    await btn_tel.first.get_attribute(
+                                        "aria-label"
+                                    )
+                                    or ""
+                                )
+                                match_btn = re.search(
+                                    r"\(?\d{2}\)?\s?\d{4,5}[-\s]?\d{4}",
+                                    label_tel,
+                                )
                                 if match_btn:
                                     telefone = match_btn.group(0)
 
-                        # 2. Endereço (filtragem refinada)
+                        # 2. Endereço
                         endereco = "Não informado"
-                        
-                        # Palavras e termos a ignorar (categorias, status, notas e o próprio nome)
                         palavras_ignore = [
-                            nome.lower(), "fechado", "aberto", "★", "estrelas", "avaliações", 
-                            "minuto", "hora", "opções no local", "compras na loja", 
-                            "retirada na porta", "entrega", "serviço", "contador", 
-                            "escritório", "contabilidade", "loja", "consultoria"
+                            nome.lower(),
+                            "fechado",
+                            "aberto",
+                            "★",
+                            "estrelas",
+                            "avaliações",
+                            "minuto",
+                            "hora",
+                            "opções no local",
+                            "compras na loja",
+                            "retirada na porta",
+                            "entrega",
+                            "serviço",
+                            "contador",
+                            "escritório",
+                            "contabilidade",
+                            "loja",
+                            "consultoria",
                         ]
 
                         for linha in linhas[1:]:
                             linha_lower = linha.lower()
-                            
-                            # Se a linha contiver palavras de endereço comuns
-                            if any(p in linha_lower for p in ["rua", "av.", "avenida", "alameda", "praça", "rodovia", "estrada", "bairro", " - ", " nº", " nº ", " n°"]):
-                                if not any(ign in linha_lower for ign in ["fechado", "aberto", "★", "avaliações"]):
+                            if any(
+                                p in linha_lower
+                                for p in [
+                                    "rua",
+                                    "av.",
+                                    "avenida",
+                                    "alameda",
+                                    "praça",
+                                    "rodovia",
+                                    "estrada",
+                                    "bairro",
+                                    " - ",
+                                    " nº",
+                                    " nº ",
+                                    " n°",
+                                ]
+                            ):
+                                if not any(
+                                    ign in linha_lower
+                                    for ign in [
+                                        "fechado",
+                                        "aberto",
+                                        "★",
+                                        "avaliações",
+                                    ]
+                                ):
                                     endereco = linha
                                     break
-                        
-                        # Fallback: Se não encontrou por palavra-chave, pega a linha que não bate com nome nem categoria
+
                         if endereco == "Não informado":
                             for linha in linhas[1:]:
                                 linha_lower = linha.lower()
-                                if not any(ign in linha_lower for ign in palavras_ignore) and len(linha) > 8:
-                                    # Garante que não é apenas a repetição do telefone
-                                    if not re.search(r'\(?\d{2}\)?\s?\d{4,5}[-\s]?\d{4}', linha):
+                                if not any(
+                                    ign in linha_lower for ign in palavras_ignore
+                                ) and len(linha) > 8:
+                                    if not re.search(
+                                        r"\(?\d{2}\)?\s?\d{4,5}[-\s]?\d{4}",
+                                        linha,
+                                    ):
                                         endereco = linha
                                         break
 
-                        # Evita cadastrar duplicados
-                        if not any(e['Nome'] == nome for e in empresas_sem_site):
-                            empresas_sem_site.append({
-                                "Nome": nome,
-                                "Telefone": telefone,
-                                "Endereço": endereco
-                            })
+                        # 3. Gera o link do WhatsApp dinamicamente
+                        link_whatsapp = gerar_link_whatsapp(telefone)
+
+                        if not any(
+                            e["Nome"] == nome for e in empresas_sem_site
+                        ):
+                            empresas_sem_site.append(
+                                {
+                                    "Nome": nome,
+                                    "Telefone": telefone,
+                                    "Endereço": endereco,
+                                    "WhatsApp": link_whatsapp,
+                                }
+                            )
                 except Exception:
                     continue
 
@@ -159,41 +249,47 @@ async def rodar_scrapper_logic(termo_busca, max_resultados=10):
 
     return empresas_sem_site
 
-@app.route('/')
-def index():
-    return render_template('index.html')
 
-@app.route('/api/buscar', methods=['POST'])
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+@app.route("/api/buscar", methods=["POST"])
 def buscar():
     data = request.get_json() or {}
-    profissao = data.get('profissao', '')
-    cidade = data.get('cidade', '')
+    profissao = data.get("profissao", "")
+    cidade = data.get("cidade", "")
 
     termo = f"{profissao} em {cidade}"
-    
+
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        resultados = loop.run_until_complete(rodar_scrapper_logic(termo, max_resultados=10))
+        resultados = loop.run_until_complete(
+            rodar_scrapper_logic(termo, max_resultados=10)
+        )
         loop.close()
         return jsonify(resultados)
     except Exception as e:
         return jsonify({"erro": f"Erro na busca: {str(e)}"}), 500
 
-@app.route('/api/download', methods=['POST'])
+
+@app.route("/api/download", methods=["POST"])
 def download():
     data = request.get_json() or []
     df = pd.DataFrame(data)
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Leads')
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Leads")
     output.seek(0)
     return send_file(
         output,
-        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         as_attachment=True,
-        download_name='leads_sem_site.xlsx'
+        download_name="leads_sem_site.xlsx",
     )
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     app.run(debug=True)
