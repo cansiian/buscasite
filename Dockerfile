@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/playwright/python:v1.62.0-jammy
+FROM mcr.microsoft.com/playwright/python:v1.63.0-jammy
 
 WORKDIR /app
 
@@ -10,4 +10,3 @@ COPY . .
 EXPOSE 5000
 
 CMD ["gunicorn", "-w", "1", "--timeout", "120", "app:app"]
-
