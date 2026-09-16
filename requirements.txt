@@ -1,5 +1,5 @@
 Flask
-playwright==1.62.0
+playwright
 pandas
 openpyxl
 gunicorn
